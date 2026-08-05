@@ -1,0 +1,16 @@
+{
+  "name": "thenameuz-booking-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram-бот записи для студии красоты the name uz",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "grammy": "^1.38.2"
+  }
+}
