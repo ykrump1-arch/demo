@@ -57,7 +57,22 @@ const d = () => db.data; // короткая запись: d().bookings и т.д
 
 const esc = U.escapeHtml;
 
-const isAdmin = (id) => ADMIN_IDS.includes(Number(id));
+// Настоящий владелец бота — может менять и рассылать.
+const isRealAdmin = (id) => ADMIN_IDS.includes(Number(id));
+
+// Кто видит админку. В демо-режиме — все, но только для просмотра.
+const isAdmin = (id) => isRealAdmin(id) || !!config.OPEN_ADMIN;
+
+// Гостю показываем только вымышленные данные, чтобы телефоны реальных людей,
+// заглянувших в демо, не увидел посторонний.
+function visibleBookings(userId) {
+  const all = d().bookings;
+  return isRealAdmin(userId) ? all : all.filter((b) => b.demo);
+}
+function visibleClients(userId) {
+  const all = Object.values(d().clients);
+  return isRealAdmin(userId) ? all : all.filter((c) => c.demo);
+}
 
 // Временное состояние диалога (в памяти). Пропадает при перезапуске — это ок,
 // клиент просто начнёт запись заново.
@@ -640,8 +655,8 @@ function adminOnly(ctx) {
   return false;
 }
 
-function kbAdminMenu() {
-  return new InlineKeyboard()
+function kbAdminMenu(userId) {
+  const kb = new InlineKeyboard()
     .text('🗓 Расписание', 'ad:slots')
     .text('📋 Записи', 'ad:bookings')
     .row()
@@ -649,16 +664,22 @@ function kbAdminMenu() {
     .text('📊 Статистика', 'ad:stats')
     .row()
     .text('📤 Выгрузка CSV', 'ad:export')
-    .text('📣 Рассылка', 'ad:broadcast')
-    .row()
-    .text('🧪 Демо-заполнение', 'ad:demo');
+    .text('📣 Рассылка', 'ad:broadcast');
+  if (isRealAdmin(userId)) kb.row().text('🧪 Демо-заполнение', 'ad:demo');
+  return kb;
 }
 
 async function screenAdmin(ctx) {
+  const guest = config.OPEN_ADMIN && !isRealAdmin(ctx.from.id);
   await show(
     ctx,
-    '<b>Панель администратора</b>\n\nВыберите раздел:',
-    kbAdminMenu()
+    '<b>Панель администратора</b>\n\n' +
+      (guest
+        ? 'Так салон ведёт запись изнутри. Данные вымышленные, ' +
+          'смотрите и трогайте что угодно.\n\n'
+        : '') +
+      'Выберите раздел:',
+    kbAdminMenu(ctx.from.id)
   );
 }
 
@@ -743,8 +764,8 @@ bot.command('slots', async (ctx) => {
 // --- Предстоящие записи -----------------------------------------------------
 
 async function screenBookings(ctx) {
-  const list = d()
-    .bookings.filter(
+  const list = visibleBookings(ctx.from.id)
+    .filter(
       (b) =>
         b.status === 'active' &&
         U.slotTimestamp(b.date, b.time) > Date.now()
@@ -786,7 +807,7 @@ bot.command('bookings', async (ctx) => {
 // --- Клиенты ----------------------------------------------------------------
 
 async function screenClients(ctx) {
-  const all = Object.values(d().clients).sort(
+  const all = visibleClients(ctx.from.id).sort(
     (a, z) => (z.bookings || 0) - (a.bookings || 0)
   );
   const booked = all.filter((c) => (c.bookings || 0) > 0);
@@ -820,10 +841,10 @@ bot.command('clients', async (ctx) => {
 
 // --- Статистика -------------------------------------------------------------
 
-function buildStats() {
+function buildStats(userId) {
   const data = d();
   const now = Date.now();
-  const all = data.bookings;
+  const all = visibleBookings(userId);
 
   const active = all.filter(
     (b) => b.status === 'active' && U.slotTimestamp(b.date, b.time) > now
@@ -836,7 +857,7 @@ function buildStats() {
   const inLast = (days) =>
     all.filter((b) => now - b.createdAt <= days * U.MS_DAY);
 
-  const clients = Object.values(data.clients);
+  const clients = visibleClients(userId);
   const withBooking = clients.filter((c) => (c.bookings || 0) > 0);
   const repeat = clients.filter((c) => (c.bookings || 0) >= 2);
 
@@ -881,8 +902,8 @@ function buildStats() {
   };
 }
 
-function statsText() {
-  const s = buildStats();
+function statsText(userId) {
+  const s = buildStats(userId);
   let t = '<b>📊 Статистика</b>\n\n';
 
   t += '<b>Записи</b>\n';
@@ -926,7 +947,7 @@ function statsText() {
 bot.command('stats', async (ctx) => {
   if (!adminOnly(ctx)) return;
   const kb = new InlineKeyboard().text('⬅️ В меню', 'ad:menu');
-  await ctx.reply(statsText(), { parse_mode: 'HTML', reply_markup: kb });
+  await ctx.reply(statsText(ctx.from.id), { parse_mode: 'HTML', reply_markup: kb });
 });
 
 // --- Выгрузка CSV -----------------------------------------------------------
@@ -936,7 +957,7 @@ function csvCell(v) {
   return `"${s}"`;
 }
 
-function buildCsv() {
+function buildCsv(userId) {
   const rows = [
     [
       'ID', 'Дата', 'Время', 'Мастер', 'Имя', 'Юзернейм',
@@ -944,7 +965,7 @@ function buildCsv() {
     ],
   ];
   const statusRu = { active: 'активна', cancelled: 'отменена' };
-  for (const b of d().bookings) {
+  for (const b of visibleBookings(userId)) {
     const created = new Date(b.createdAt + config.TZ_OFFSET_HOURS * U.MS_HOUR);
     rows.push([
       b.id,
@@ -969,7 +990,7 @@ function buildCsv() {
 }
 
 async function sendCsv(ctx) {
-  const csv = buildCsv();
+  const csv = buildCsv(ctx.from.id);
   const name = `zapisi_${U.todayStr()}.csv`;
   await ctx.replyWithDocument(new InputFile(Buffer.from(csv, 'utf8'), name), {
     caption: `Выгрузка на ${U.formatDateFull(U.todayStr())}. Открывается в Excel.`,
@@ -1001,7 +1022,7 @@ function fillDemo() {
 }
 
 bot.command('demo', async (ctx) => {
-  if (!adminOnly(ctx)) return;
+  if (!isRealAdmin(ctx.from.id)) return;
   const n = fillDemo();
   await ctx.reply(
     `🧪 Расписание заполнено рабочими часами.\nОткрыто новых окон: <b>${n}</b>\n\n` +
@@ -1015,7 +1036,7 @@ bot.command('demo', async (ctx) => {
 
 // Вернуть демо в исходное состояние — после показа клиенту.
 bot.command('demoreset', async (ctx) => {
-  if (!adminOnly(ctx)) return;
+  if (!isRealAdmin(ctx.from.id)) return;
   if (!config.DEMO) {
     await ctx.reply('Бот работает не в демо-режиме.');
     return;
@@ -1034,7 +1055,7 @@ bot.command('demoreset', async (ctx) => {
 });
 
 bot.command('reset', async (ctx) => {
-  if (!adminOnly(ctx)) return;
+  if (!isRealAdmin(ctx.from.id)) return;
   const arg = String(ctx.match || '').trim().toUpperCase();
   const data = d();
 
@@ -1089,7 +1110,7 @@ async function startBroadcast(ctx) {
 }
 
 bot.command('broadcast', async (ctx) => {
-  if (!adminOnly(ctx)) return;
+  if (!isRealAdmin(ctx.from.id)) return;
   await startBroadcast(ctx);
 });
 
@@ -1468,11 +1489,27 @@ bot.on('callback_query:data', async (ctx) => {
     if (a === 'clients') return screenClients(ctx);
     if (a === 'stats') {
       const kb = new InlineKeyboard().text('⬅️ В меню', 'ad:menu');
-      return show(ctx, statsText(), kb);
+      return show(ctx, statsText(ctx.from.id), kb);
     }
     if (a === 'export') return sendCsv(ctx);
-    if (a === 'broadcast') return startBroadcast(ctx);
+    if (a === 'broadcast') {
+      if (!isRealAdmin(ctx.from.id)) {
+        const kb = new InlineKeyboard().text('⬅️ В меню', 'ad:menu');
+        return show(
+          ctx,
+          '📣 <b>Рассылка</b>\n\n' +
+            'Отсюда владелец салона отправляет сообщение всем клиентам — ' +
+            'текстом или фото с подписью.\n\n' +
+            'После отправки приходит отчёт: кому дошло, кому нет и почему ' +
+            '(заблокировал бота, удалил аккаунт, чат не найден).\n\n' +
+            '🧪 В демо отправка отключена.',
+          kb
+        );
+      }
+      return startBroadcast(ctx);
+    }
     if (a === 'demo') {
+      if (!isRealAdmin(ctx.from.id)) return screenAdmin(ctx);
       const n = fillDemo();
       const kb = new InlineKeyboard().text('⬅️ В меню', 'ad:menu');
       return show(
@@ -1500,6 +1537,13 @@ bot.on('callback_query:data', async (ctx) => {
       return screenSlotGrid(ctx, parts[2], parts[3]);
     }
     if (a === 't') {
+      if (!isRealAdmin(ctx.from.id)) {
+        await ctx.answerCallbackQuery({
+          text: 'В демо расписание только для просмотра',
+          show_alert: true,
+        });
+        return;
+      }
       const mid = parts[2];
       const date = parts[3];
       const time = U.decTime(parts[4]);
@@ -1526,6 +1570,13 @@ bot.on('callback_query:data', async (ctx) => {
       return screenSlotGrid(ctx, mid, date);
     }
     if (a === 'all' || a === 'clr') {
+      if (!isRealAdmin(ctx.from.id)) {
+        await ctx.answerCallbackQuery({
+          text: 'В демо расписание только для просмотра',
+          show_alert: true,
+        });
+        return;
+      }
       const [, , mid, date] = parts;
       const day = ensureDay(mid, date);
       for (const t of U.allSlotTimes()) {
